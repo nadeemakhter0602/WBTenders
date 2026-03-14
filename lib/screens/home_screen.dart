@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/sms_tender.dart';
 import '../services/sms_service.dart';
+import '../services/update_service.dart';
 import 'tender_detail_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -17,10 +20,26 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _loading = false;
   String? _error;
   List<SmsTender> _tenders = [];
+  ({String version, String downloadUrl, String releaseUrl})? _update;
+  bool _checkingUpdate = false;
+  String _appVersion = '';
+
   @override
   void initState() {
     super.initState();
     _load();
+    _checkUpdate();
+    _loadVersion();
+  }
+
+  Future<void> _loadVersion() async {
+    final info = await PackageInfo.fromPlatform();
+    if (mounted) setState(() => _appVersion = info.version);
+  }
+
+  Future<void> _checkUpdate() async {
+    final update = await UpdateService.checkForUpdate();
+    if (update != null && mounted) setState(() => _update = update);
   }
 
   Future<void> _load() async {
@@ -55,9 +74,95 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: const Icon(Icons.refresh),
             onPressed: _loading ? null : _load,
           ),
+          PopupMenuButton<String>(
+            onSelected: (value) async {
+              if (value == 'check_update') {
+                final messenger = ScaffoldMessenger.of(context);
+                setState(() => _checkingUpdate = true);
+                final update = await UpdateService.checkForUpdate();
+                if (!mounted) return;
+                setState(() {
+                  _checkingUpdate = false;
+                  if (update != null) _update = update;
+                });
+                if (update == null) {
+                  messenger.showSnackBar(
+                    const SnackBar(content: Text('Already up to date')),
+                  );
+                }
+              } else if (value == 'about') {
+                showAboutDialog(
+                  context: context,
+                  applicationName: 'WBTenders',
+                  applicationVersion: _appVersion,
+                  applicationIcon: const Icon(Icons.gavel, size: 48, color: Colors.indigo),
+                  children: [
+                    const Text(
+                      'Android app for tracking West Bengal eProcurement tender statuses from wbtenders.gov.in.',
+                    ),
+                    const SizedBox(height: 12),
+                    InkWell(
+                      onTap: () => launchUrl(
+                        Uri.parse('https://github.com/nadeemakhter0602/WBTenders'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                      child: const Text(
+                        'github.com/nadeemakhter0602/WBTenders',
+                        style: TextStyle(
+                          color: Colors.indigo,
+                          decoration: TextDecoration.underline,
+                          decorationColor: Colors.indigo,
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              }
+            },
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                value: 'check_update',
+                child: Row(
+                  children: [
+                    _checkingUpdate
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.indigo),
+                          )
+                        : const Icon(Icons.system_update_outlined, size: 20),
+                    const SizedBox(width: 12),
+                    const Text('Check for Updates'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'about',
+                child: Row(
+                  children: [
+                    Icon(Icons.info_outline, size: 20),
+                    SizedBox(width: 12),
+                    Text('About'),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ],
       ),
-      body: SafeArea(top: false, child: _buildBody()),
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            if (_update != null)
+              _UpdateBanner(
+                update: _update!,
+                onDismiss: () => setState(() => _update = null),
+              ),
+            Expanded(child: _buildBody()),
+          ],
+        ),
+      ),
     );
   }
 
@@ -277,6 +382,55 @@ class _SmsCard extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _UpdateBanner extends StatelessWidget {
+  final ({String version, String downloadUrl, String releaseUrl}) update;
+  final VoidCallback onDismiss;
+
+  const _UpdateBanner({required this.update, required this.onDismiss});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialBanner(
+      backgroundColor: Colors.indigo.withValues(alpha: 0.08),
+      leading: const Icon(Icons.system_update_outlined, color: Colors.indigo),
+      content: Text(
+        'v${update.version} available',
+        style: const TextStyle(fontWeight: FontWeight.w600),
+      ),
+      actions: [
+        TextButton(
+          onPressed: onDismiss,
+          child: const Text('Later'),
+        ),
+        if (update.releaseUrl.isNotEmpty)
+          TextButton(
+            onPressed: () {
+              onDismiss();
+              launchUrl(Uri.parse(update.releaseUrl), mode: LaunchMode.externalApplication);
+            },
+            child: const Text('GitHub'),
+          ),
+        if (update.downloadUrl.isNotEmpty)
+          TextButton(
+            onPressed: () {
+              onDismiss();
+              UpdateService.downloadAndInstall(context, update.downloadUrl, update.version);
+            },
+            child: const Text('Update'),
+          )
+        else
+          TextButton(
+            onPressed: () {
+              onDismiss();
+              launchUrl(Uri.parse(update.releaseUrl), mode: LaunchMode.externalApplication);
+            },
+            child: const Text('View release'),
+          ),
+      ],
     );
   }
 }

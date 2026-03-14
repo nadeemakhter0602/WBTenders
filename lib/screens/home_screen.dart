@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:permission_handler/permission_handler.dart';
+
 import '../models/sms_tender.dart';
 import '../services/sms_service.dart';
 import '../services/update_service.dart';
@@ -19,6 +21,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   bool _loading = false;
   String? _error;
+  bool _permPermanentlyDenied = false;
   List<SmsTender> _tenders = [];
   ({String version, String downloadUrl, String releaseUrl})? _update;
   bool _checkingUpdate = false;
@@ -52,8 +55,18 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
       setState(() {
         _tenders = tenders;
+        _permPermanentlyDenied = false;
         if (tenders.isEmpty) _error = 'No tender SMS found in your inbox.';
       });
+    } on SmsPermissionException catch (e) {
+      if (mounted) {
+        setState(() {
+          _permPermanentlyDenied = e.permanent;
+          _error = e.permanent
+              ? 'SMS permission permanently denied.\nGrant it in App Settings to continue.'
+              : 'SMS permission denied.';
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     } finally {
@@ -130,9 +143,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             height: 20,
                             child: CircularProgressIndicator(strokeWidth: 2, color: Colors.indigo),
                           )
-                        : const Icon(Icons.system_update_outlined, size: 20),
+                        : const Icon(Icons.system_update_outlined, size: 20, color: Colors.black87),
                     const SizedBox(width: 12),
-                    const Text('Check for Updates'),
+                    const Text('Check for Updates', style: TextStyle(color: Colors.black87)),
                   ],
                 ),
               ),
@@ -140,9 +153,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 value: 'about',
                 child: Row(
                   children: [
-                    Icon(Icons.info_outline, size: 20),
+                    Icon(Icons.info_outline, size: 20, color: Colors.black87),
                     SizedBox(width: 12),
-                    Text('About'),
+                    Text('About', style: TextStyle(color: Colors.black87)),
                   ],
                 ),
               ),
@@ -198,6 +211,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 icon: const Icon(Icons.refresh),
                 label: const Text('Retry'),
               ),
+              if (_permPermanentlyDenied) ...[
+                const SizedBox(height: 8),
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    await openAppSettings();
+                    if (mounted) _load();
+                  },
+                  icon: const Icon(Icons.settings_outlined),
+                  label: const Text('Open Settings'),
+                ),
+              ],
             ],
           ),
         ),

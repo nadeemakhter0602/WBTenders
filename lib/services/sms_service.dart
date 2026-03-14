@@ -26,18 +26,15 @@ class SmsService {
     'nicsi',
   ];
 
-  /// Requests READ_SMS permission and returns whether it was granted.
-  Future<bool> requestPermission() async {
-    final status = await Permission.sms.request();
-    return status.isGranted;
-  }
-
   /// Reads the SMS inbox and returns all tender-related messages,
   /// each as its own entry, ordered by date (newest first).
   Future<List<SmsTender>> getTenderSms() async {
-    final granted = await requestPermission();
-    if (!granted) {
-      throw Exception('SMS permission denied. Please allow it in Settings.');
+    final status = await Permission.sms.request();
+    if (status.isPermanentlyDenied) {
+      throw SmsPermissionException(permanent: true);
+    }
+    if (!status.isGranted) {
+      throw SmsPermissionException(permanent: false);
     }
 
     final query = SmsQuery();
@@ -78,4 +75,9 @@ class SmsService {
 
     return results;
   }
+}
+
+class SmsPermissionException implements Exception {
+  final bool permanent;
+  const SmsPermissionException({required this.permanent});
 }

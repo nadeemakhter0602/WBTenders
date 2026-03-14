@@ -31,10 +31,10 @@ class SmsService {
   Future<List<SmsTender>> getTenderSms() async {
     final status = await Permission.sms.request();
     if (status.isPermanentlyDenied) {
-      throw SmsPermissionException(permanent: true);
+      throw const SmsPermissionException(permanent: true);
     }
     if (!status.isGranted) {
-      throw SmsPermissionException(permanent: false);
+      throw const SmsPermissionException(permanent: false);
     }
 
     final query = SmsQuery();

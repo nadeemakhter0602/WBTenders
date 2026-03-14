@@ -466,6 +466,7 @@ class TenderService {
 
     final sections = <SummarySection>[];
     var pendingTitle = '';
+    var pendingSubTitle = ''; // fallback from td_caption for nested list tables
 
     void walk(dom.Element el) {
       for (final child in el.children) {
@@ -474,20 +475,27 @@ class TenderService {
           if (t.isNotEmpty) pendingTitle = t;
           continue;
         }
+        if (child.localName == 'td' && child.classes.contains('td_caption')) {
+          final t = child.text.trim().replaceAll(RegExp(r'\s+'), ' ');
+          if (t.isNotEmpty) pendingSubTitle = t;
+          continue;
+        }
         if (child.localName == 'table' && child.classes.contains('tablebg')) {
           final section = _parseTablebg(child, pendingTitle);
           if (section != null) {
             sections.add(section);
             pendingTitle = '';
           }
-          walk(child); // recurse to find nested list_tables
+          walk(child);
           continue;
         }
         if (child.localName == 'table' && child.classes.contains('list_table')) {
-          final section = _parseListTable(child, pendingTitle);
+          final title = pendingTitle.isNotEmpty ? pendingTitle : pendingSubTitle;
+          final section = _parseListTable(child, title);
           if (section != null) {
             sections.add(section);
             pendingTitle = '';
+            pendingSubTitle = '';
           }
           continue;
         }
@@ -518,6 +526,19 @@ class TenderService {
   }
 
   SummarySection? _parseListTable(dom.Element table, String title) {
+    // If this table has no direct list_header row it's a wrapper — delegate
+    // to the real data table nested inside (e.g. packetTableView for Covers).
+    final hasHeader =
+        _directRows(table).any((r) => r.classes.contains('list_header'));
+    if (!hasHeader) {
+      var inner = table.querySelector('tr.list_header')?.parent;
+      if (inner?.localName == 'tbody') inner = inner?.parent;
+      if (inner != null && inner.localName == 'table') {
+        return _parseListTable(inner, title);
+      }
+      return null;
+    }
+
     final dataRows = <List<String>>[];
     final dataLinks = <List<String?>>[];
     for (final tr in _directRows(table)) {
@@ -532,7 +553,7 @@ class TenderService {
       dataLinks.add(links);
     }
     if (dataRows.isEmpty) return null;
-    return SummarySection(title: title, rows: dataRows, cellLinks: dataLinks);
+    return SummarySection(title: title, rows: dataRows, cellLinks: dataLinks, isListTable: true);
   }
 
   List<dom.Element> _directRows(dom.Element table) {

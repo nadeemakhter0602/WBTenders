@@ -8,18 +8,25 @@ class SummarySection {
   /// Parallel to [rows]: URL for each cell, or null if the cell has no link.
   final List<List<String?>> cellLinks;
 
+  /// True when parsed from a <table class="list_table"> — always render as
+  /// a columnar table regardless of column count.
+  final bool isListTable;
+
   const SummarySection({
     required this.title,
     required this.rows,
     this.cellLinks = const [],
+    this.isListTable = false,
   });
 
   /// True when every row has exactly 2 cells → render as label/value pairs.
-  bool get isKeyValue => rows.isNotEmpty && rows.every((r) => r.length == 2);
+  bool get isKeyValue => !isListTable && rows.isNotEmpty && rows.every((r) => r.length == 2);
 
   /// True when rows are a mix of 2- and 4-column KV rows (label,value,label,value).
   /// The original site uses 4-column tables for "Basic Details" etc.
+  /// Never true for list tables (they must render as columnar tables).
   bool get isKeyValueLike =>
+      !isListTable &&
       rows.isNotEmpty &&
       rows.every((r) => r.length == 2 || r.length == 4) &&
       !rows.every((r) => r.length == 2); // at least one 4-col row

@@ -499,6 +499,22 @@ class TenderService {
           }
           continue;
         }
+        // ── Stage-summary tables (table_list class) ──────────────────────
+        if (child.localName == 'table' && child.classes.contains('table_list')) {
+          String title = pendingTitle;
+          if (title.isEmpty) {
+            final sh = child.querySelector('td.section_head');
+            if (sh != null) title = sh.text.trim().replaceAll(RegExp(r'\s+'), ' ');
+          }
+          if (title.isEmpty) title = pendingSubTitle;
+          final section = _parseTableList(child, title);
+          if (section != null) {
+            sections.add(section);
+            pendingTitle = '';
+            pendingSubTitle = '';
+          }
+          continue;
+        }
         walk(child);
       }
     }
@@ -556,6 +572,29 @@ class TenderService {
     }
     if (dataRows.isEmpty) return null;
     return SummarySection(title: title, rows: dataRows, cellLinks: dataLinks, isListTable: true);
+  }
+
+  /// Parses a <table class="table_list"> (stage-summary page format).
+  /// Skips the internal section-title row (td.section_head); remaining rows
+  /// are header + data. isListTable is left false so isKeyValue works for
+  /// 2-column KV tables.
+  SummarySection? _parseTableList(dom.Element table, String title) {
+    final dataRows = <List<String>>[];
+    final dataLinks = <List<String?>>[];
+    for (final tr in _directRows(table)) {
+      final cells = tr.querySelectorAll('td, th');
+      if (cells.isEmpty) continue;
+      if (cells.any((c) => c.classes.contains('section_head'))) continue;
+      final vals = cells
+          .map((c) => c.text.trim().replaceAll(RegExp(r'\s+'), ' '))
+          .toList();
+      if (vals.every((v) => v.isEmpty)) continue;
+      final links = cells.map((c) => _cellLink(c)).toList();
+      dataRows.add(vals);
+      dataLinks.add(links);
+    }
+    if (dataRows.isEmpty) return null;
+    return SummarySection(title: title, rows: dataRows, cellLinks: dataLinks);
   }
 
   List<dom.Element> _directRows(dom.Element table) {

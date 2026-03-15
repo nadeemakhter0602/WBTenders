@@ -29,7 +29,8 @@ class SummarySection {
       !isListTable &&
       rows.isNotEmpty &&
       rows.every((r) => r.length == 2 || r.length == 4) &&
-      !rows.every((r) => r.length == 2); // at least one 4-col row
+      rows.any((r) => r.length == 4) &&
+      rows.any((r) => r.length == 2); // must have BOTH 2-col and 4-col rows
 
   /// For multi-column tables: first row is headers, rest is data.
   List<String> get headers =>

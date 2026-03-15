@@ -998,20 +998,22 @@ class _AdvancedResultDetailScreenState
       ),
       body: SafeArea(
         top: false,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            _ResultFieldsCard(result: widget.result),
-            if (widget.result.links.isNotEmpty) ...[
+        child: SelectionArea(
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              _ResultFieldsCard(result: widget.result),
+              if (widget.result.links.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                _LinksCard(
+                  links: widget.result.links,
+                  service: widget.service,
+                ),
+              ],
               const SizedBox(height: 12),
-              _LinksCard(
-                links: widget.result.links,
-                service: widget.service,
-              ),
+              _buildSummarySection(),
             ],
-            const SizedBox(height: 12),
-            _buildSummarySection(),
-          ],
+          ),
         ),
       ),
     );
@@ -1885,44 +1887,46 @@ class _LinkDetailScreenState extends State<_LinkDetailScreen> {
       ),
       body: SafeArea(
         top: false,
-        child: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : _error != null
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.error_outline,
-                              size: 40, color: Colors.red),
-                          const SizedBox(height: 10),
-                          Text(_error!,
-                              textAlign: TextAlign.center,
-                              style:
-                                  const TextStyle(color: Colors.black54)),
-                          const SizedBox(height: 12),
-                          ElevatedButton.icon(
-                            onPressed: _load,
-                            icon: const Icon(Icons.refresh),
-                            label: const Text('Retry'),
-                          ),
-                        ],
-                      ),
-                    ),
-                  )
-                : _sections.isEmpty
-                    ? const Center(
-                        child: Text('No content found.',
-                            style: TextStyle(color: Colors.black54)))
-                    : ListView.separated(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _sections.length,
-                        separatorBuilder: (_, __) =>
+        child: SelectionArea(
+          child: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : _error != null
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.error_outline,
+                                size: 40, color: Colors.red),
+                            const SizedBox(height: 10),
+                            Text(_error!,
+                                textAlign: TextAlign.center,
+                                style:
+                                    const TextStyle(color: Colors.black54)),
                             const SizedBox(height: 12),
-                        itemBuilder: (_, i) =>
-                            _SummarySectionCard(section: _sections[i]),
+                            ElevatedButton.icon(
+                              onPressed: _load,
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Retry'),
+                            ),
+                          ],
+                        ),
                       ),
+                    )
+                  : _sections.isEmpty
+                      ? const Center(
+                          child: Text('No content found.',
+                              style: TextStyle(color: Colors.black54)))
+                      : ListView.separated(
+                          padding: const EdgeInsets.all(16),
+                          itemCount: _sections.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 12),
+                          itemBuilder: (_, i) =>
+                              _SummarySectionCard(section: _sections[i]),
+                        ),
+        ),
       ),
     );
   }

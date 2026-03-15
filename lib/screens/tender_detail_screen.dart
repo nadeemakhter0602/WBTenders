@@ -145,13 +145,15 @@ class _TenderDetailScreenState extends State<TenderDetailScreen> {
       ),
       body: SafeArea(
         top: false,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            _SmsSnippet(sms: widget.sms),
-            const SizedBox(height: 16),
-            _buildPhaseWidget(),
-          ],
+        child: SelectionArea(
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              _SmsSnippet(sms: widget.sms),
+              const SizedBox(height: 16),
+              _buildPhaseWidget(),
+            ],
+          ),
         ),
       ),
     );

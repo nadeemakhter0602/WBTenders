@@ -526,8 +526,10 @@ class TenderService {
   }
 
   SummarySection? _parseListTable(dom.Element table, String title) {
-    // If this table has no direct list_header row it's a wrapper — delegate
-    // to the real data table nested inside (e.g. packetTableView for Covers).
+    // If this table has no direct list_header row, check whether it's a
+    // wrapper whose real data sits in a nested table (e.g. packetTableView
+    // for Covers Information).  Only delegate when such an inner table is
+    // actually found; otherwise fall through and parse this table directly.
     final hasHeader =
         _directRows(table).any((r) => r.classes.contains('list_header'));
     if (!hasHeader) {
@@ -536,7 +538,7 @@ class TenderService {
       if (inner != null && inner.localName == 'table') {
         return _parseListTable(inner, title);
       }
-      return null;
+      // No inner table with list_header found — parse this table directly.
     }
 
     final dataRows = <List<String>>[];

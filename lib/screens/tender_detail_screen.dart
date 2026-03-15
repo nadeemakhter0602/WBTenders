@@ -9,7 +9,7 @@ import '../models/tender_result.dart';
 import '../services/captcha_service.dart';
 import '../services/tender_service.dart';
 
-const _maxAutoRetries = 10;
+const _maxAutoRetries = 5;
 
 class TenderDetailScreen extends StatefulWidget {
   final SmsTender sms;

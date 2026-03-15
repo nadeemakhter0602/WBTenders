@@ -9,7 +9,7 @@ import '../services/advanced_search_service.dart';
 import '../services/captcha_service.dart';
 import '../services/tender_service.dart' show CaptchaRejectedError;
 
-const _maxAutoRetries = 10;
+const _maxAutoRetries = 5;
 
 // ── Main Screen ───────────────────────────────────────────────────────────────
 

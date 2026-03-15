@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cookie_jar/cookie_jar.dart';
@@ -6,10 +7,19 @@ import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
+import 'package:path_provider/path_provider.dart';
 
 import '../models/summary_section.dart';
 import '../models/tender_result.dart';
 import 'tender_service.dart' show CaptchaRejectedError;
+
+/// Thrown when a document download requires solving a DocDownCaptcha challenge.
+class DocCaptchaRequired implements Exception {
+  final Uint8List captchaBytes;
+  final Map<String, String> hiddenFields;
+  const DocCaptchaRequired(
+      {required this.captchaBytes, required this.hiddenFields});
+}
 
 class SearchPageResult {
   final List<TenderResult> results;
@@ -591,6 +601,16 @@ class AdvancedSearchService {
           continue;
         }
 
+        // ── Notice / error message box ────────────────────────────────
+        if (child.localName == 'td' &&
+            child.classes.contains('message_box')) {
+          final t = child.text.trim().replaceAll(RegExp(r'\s+'), ' ');
+          if (t.isNotEmpty) {
+            sections.add(SummarySection(title: t, rows: []));
+          }
+          continue;
+        }
+
         // ── KV data table (tablebg) ────────────────────────────────────
         if (child.localName == 'table' &&
             child.classes.contains('tablebg')) {
@@ -621,6 +641,52 @@ class AdvancedSearchService {
     }
 
     walk(root);
+
+    // "Download as zip file" (a#DirectLink_8) lives in a <span>-wrapped <tr>
+    // (invalid HTML) — the parser foster-parents it outside td.page_content so
+    // walk() never sees it. Query the full document by known id.
+    // Find by the static zipicon.png image inside the anchor — more stable than
+    // the DirectLink_N id which can vary between tenders.
+    final zipImg = doc.querySelector('img[src*="zipicon"]');
+    dom.Element? zipAnchor;
+    if (zipImg != null) {
+      dom.Element? p = zipImg.parent;
+      while (p != null && p.localName != 'a') {
+        p = p.parent;
+      }
+      if (p != null && p.localName == 'a') zipAnchor = p;
+    }
+    if (zipAnchor != null) {
+      final href = zipAnchor.attributes['href'] ?? '';
+      if (href.isNotEmpty) {
+        final url =
+            href.startsWith('http') ? href : 'https://wbtenders.gov.in$href';
+        final zipSection = SummarySection(
+          title: '',
+          rows: [
+            [''],
+            ['Download as zip file'],
+          ],
+          cellLinks: [
+            [null],
+            [url],
+          ],
+          isListTable: true,
+        );
+        // Insert after the Tender Documents (NIT docs) list_table — identified
+        // as the last list_table section containing a docDownoad link.
+        final nitIdx = sections.lastIndexWhere((s) =>
+            s.isListTable &&
+            s.cellLinks.any((row) => row.any((u) =>
+                u != null && u.toLowerCase().contains('docdownoad'))));
+        if (nitIdx >= 0) {
+          sections.insert(nitIdx + 1, zipSection);
+        } else {
+          sections.add(zipSection);
+        }
+      }
+    }
+
     return sections;
   }
 
@@ -677,6 +743,22 @@ class AdvancedSearchService {
           .toList();
       if (vals.every((v) => v.isEmpty)) continue;
       final links = cells.map((c) => _cellLink(c)).toList();
+
+      // Fix attribution: the download icon cell carries the docDownoad URL but
+      // has no visible text. Move that URL to the document-name cell so the
+      // filename is the tappable element.
+      const docExts = ['.pdf', '.xls', '.xlsx', '.doc', '.docx', '.zip', '.rar'];
+      final dlIdx = links.indexWhere(
+          (u) => u != null && u.toLowerCase().contains('component=docdownoad'));
+      if (dlIdx >= 0) {
+        final nameIdx = vals.indexWhere(
+            (v) => docExts.any(v.toLowerCase().endsWith));
+        if (nameIdx >= 0 && nameIdx != dlIdx) {
+          links[nameIdx] = links[dlIdx];
+          links[dlIdx] = null;
+        }
+      }
+
       dataRows.add(vals);
       dataLinks.add(links);
     }
@@ -739,11 +821,215 @@ class AdvancedSearchService {
     return buf.toString().trim().replaceAll(RegExp(r'\s+'), ' ');
   }
 
-  /// Returns the href of the first anchor in a cell, or null.
+  // ── Document download ────────────────────────────────────────────────────
+
+  /// Returns true for URLs that should be downloaded as files rather than
+  /// opened in a browser.
+  ///
+  /// [text] is the visible link text. Signature/DSC links have no visible text
+  /// (image-only anchors) so [text] will be blank — those are excluded.
+  static bool isDownloadableLink(String url, String text) {
+    final urlLower = url.toLowerCase();
+    // Zip bundle download
+    if (urlLower.contains('component=zipdownload')) return true;
+    // Direct file by extension (no captcha needed)
+    final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+    if (path.endsWith('.pdf') ||
+        path.endsWith('.xls') ||
+        path.endsWith('.xlsx') ||
+        path.endsWith('.doc') ||
+        path.endsWith('.docx') ||
+        path.endsWith('.zip')) {
+      return true;
+    }
+    // For opaque Tapestry $DirectLink URLs, use link text to distinguish
+    // document/zip links from image-only signature (certificate) links.
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return false; // image-only = signature link
+    final textLower = trimmed.toLowerCase();
+    if (textLower.contains('download')) return true;
+    const docExts = ['.pdf', '.xls', '.xlsx', '.doc', '.docx', '.zip', '.rar'];
+    if (docExts.any(textLower.endsWith)) return true;
+    return false;
+  }
+
+
+  /// GETs the document URL.
+  /// - Returns the local file path if the server sends the file directly.
+  /// - Throws [DocCaptchaRequired] if the server shows a DocDownCaptcha page.
+  Future<String> fetchDocument(String url) async {
+    final resp = await _dio.get<List<int>>(
+      url,
+      options: Options(
+        responseType: ResponseType.bytes,
+        headers: {'Referer': _baseUrl},
+      ),
+    );
+    final ct = resp.headers.value('content-type') ?? '';
+    if (!ct.startsWith('text/html')) {
+      return await _saveToTempAsync(resp.data!, ct, url);
+    }
+    final doc = html_parser.parse(utf8.decode(resp.data!));
+    throw _docCaptchaFromPage(doc) ??
+        Exception('Unexpected HTML response when downloading document.');
+  }
+
+  /// POSTs the DocDownCaptcha form.
+  /// - Returns the local file path on success.
+  /// - Throws [DocCaptchaRequired] (with a fresh challenge) if captcha was wrong.
+  Future<String> submitDocCaptcha(
+      Map<String, String> hiddenFields, String captchaText, String originalUrl) async {
+    final payload = _encodePayload({
+      ...hiddenFields,
+      'captchaText': captchaText,
+      'Submit': 'Submit',
+    });
+    final postResp = await _dio.post<List<int>>(
+      _baseUrl,
+      data: payload,
+      options: Options(
+        contentType: 'application/x-www-form-urlencoded',
+        responseType: ResponseType.bytes,
+        headers: {
+          'Referer': originalUrl,
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'same-origin',
+        },
+      ),
+    );
+    final postCt = postResp.headers.value('content-type') ?? '';
+    if (!postCt.startsWith('text/html')) {
+      return await _saveToTempAsync(postResp.data!, postCt, originalUrl);
+    }
+    final postDoc = html_parser.parse(utf8.decode(postResp.data!));
+    final challenge = _docCaptchaFromPage(postDoc);
+    if (challenge != null) throw challenge;
+
+    // Captcha accepted. The server returns an HTML page that contains a fresh
+    // download link (with a new sp= token). Extract that link and fetch it.
+    // Falling back to originalUrl would re-trigger the captcha (old sp token).
+    //
+    // When the original request was for the zip bundle (not an individual
+    // docDownoad PDF), prefer the zip anchor from the success page rather than
+    // the first docDownoad individual-file link.
+    String? downloadUrl;
+    if (originalUrl.toLowerCase().contains('component=docdownoad')) {
+      downloadUrl = _extractDownloadLink(postDoc) ?? originalUrl;
+    } else {
+      final zipImg = postDoc.querySelector('img[src*="zipicon"]');
+      if (zipImg != null) {
+        dom.Element? p = zipImg.parent;
+        while (p != null && p.localName != 'a') {
+          p = p.parent;
+        }
+        if (p != null && p.localName == 'a') {
+          final href = p.attributes['href'] ?? '';
+          if (href.isNotEmpty) {
+            downloadUrl =
+                href.startsWith('http') ? href : 'https://wbtenders.gov.in$href';
+          }
+        }
+      }
+      downloadUrl ??= originalUrl;
+    }
+    return await fetchDocument(downloadUrl);
+  }
+
+  /// Finds the first downloadable link in a page (used after captcha success).
+  /// Uses URL-based criteria only — avoids matching the site's navigation
+  /// "Downloads" link (page=StandardBiddingDocuments) via text.
+  String? _extractDownloadLink(dom.Document doc) {
+    for (final a in doc.querySelectorAll('a[href]')) {
+      final href = a.attributes['href'] ?? '';
+      if (href.isEmpty) continue;
+      final url =
+          href.startsWith('http') ? href : 'https://wbtenders.gov.in$href';
+      final urlLower = url.toLowerCase();
+      if (urlLower.contains('component=docdownoad')) return url;
+      if (urlLower.contains('component=zipdownload')) return url;
+      final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+      if (path.endsWith('.pdf') || path.endsWith('.xls') ||
+          path.endsWith('.xlsx') || path.endsWith('.doc') ||
+          path.endsWith('.docx') || path.endsWith('.zip')) {
+        return url;
+      }
+      final text = a.text.replaceAll('\u00a0', ' ').trim();
+      if (text.isNotEmpty) {
+        final textLower = text.toLowerCase();
+        const exts = ['.pdf', '.xls', '.xlsx', '.doc', '.docx', '.zip', '.rar'];
+        if (exts.any(textLower.endsWith)) return url;
+      }
+    }
+    return null;
+  }
+
+  /// Builds a [DocCaptchaRequired] from a DocDownCaptcha HTML page, or null.
+  DocCaptchaRequired? _docCaptchaFromPage(dom.Document doc) {
+    final captchaImg = doc.querySelector('img#captchaImage');
+    if (captchaImg == null) return null;
+    final src = captchaImg.attributes['src'] ?? '';
+    if (!src.startsWith('data:image')) return null;
+    final captchaBytes =
+        base64Decode(src.split(',').last.replaceAll(RegExp(r'\s'), ''));
+    final hidden = <String, String>{};
+    for (final input
+        in doc.querySelectorAll('form#frmCaptcha input[type="hidden"]')) {
+      final name = input.attributes['name'] ?? input.attributes['id'];
+      if (name != null && name.isNotEmpty) {
+        hidden[name] = input.attributes['value'] ?? '';
+      }
+    }
+    return DocCaptchaRequired(captchaBytes: captchaBytes, hiddenFields: hidden);
+  }
+
+  Future<String> _saveToTempAsync(
+      List<int> bytes, String contentType, String url) async {
+    String ext = '';
+    final uriPath = Uri.parse(url).path;
+    final dot = uriPath.lastIndexOf('.');
+    if (dot >= 0 && uriPath.length - dot <= 5) {
+      ext = uriPath.substring(dot).toLowerCase();
+    }
+    if (ext.isEmpty) {
+      final ct = contentType.toLowerCase();
+      if (ct.contains('pdf')) {
+        ext = '.pdf';
+      } else if (ct.contains('spreadsheetml') || ct.contains('excel')) {
+        ext = '.xlsx';
+      } else if (ct.contains('wordprocessingml') || ct.contains('word')) {
+        ext = '.docx';
+      } else if (ct.contains('zip')) {
+        ext = '.zip';
+      } else {
+        ext = '.bin';
+      }
+    }
+    final dir = await getTemporaryDirectory();
+    final file = File(
+        '${dir.path}/tender_${DateTime.now().millisecondsSinceEpoch}$ext');
+    await file.writeAsBytes(bytes);
+    return file.path;
+  }
+
+  /// Returns the href of the most relevant anchor in a cell, or null.
+  /// Prefers anchors with visible text (skips image-only certificate/DSC links).
   String? _cellLink(dom.Element cell) {
-    final a = cell.querySelector('a[href]');
-    if (a == null) return null;
-    final href = a.attributes['href'] ?? '';
+    dom.Element? fallback;
+    for (final a in cell.querySelectorAll('a[href]')) {
+      final href = a.attributes['href'] ?? '';
+      if (href.isEmpty) continue;
+      final text = a.text.replaceAll('\u00a0', ' ').trim();
+      if (text.isNotEmpty) {
+        // First text-bearing anchor wins.
+        return href.startsWith('http')
+            ? href
+            : 'https://wbtenders.gov.in$href';
+      }
+      fallback ??= a; // keep first image-only anchor as last resort
+    }
+    if (fallback == null) return null;
+    final href = fallback.attributes['href'] ?? '';
     if (href.isEmpty) return null;
     return href.startsWith('http')
         ? href

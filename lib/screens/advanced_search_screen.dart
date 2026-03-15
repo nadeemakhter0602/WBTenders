@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:open_file/open_file.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/summary_section.dart';
@@ -1066,7 +1067,7 @@ class _AdvancedResultDetailScreenState
         children: p.sections
             .map((s) => Padding(
                   padding: const EdgeInsets.only(bottom: 12),
-                  child: _SummarySectionCard(section: s),
+                  child: _SummarySectionCard(section: s, service: widget.service),
                 ))
             .toList(),
       );
@@ -1600,9 +1601,204 @@ class _ResultFieldsCard extends StatelessWidget {
   }
 }
 
+Future<void> _downloadAndOpen(
+    BuildContext context, String url, AdvancedSearchService service) async {
+  final messenger = ScaffoldMessenger.of(context);
+
+  void showProgress() => messenger.showSnackBar(const SnackBar(
+        content: Row(children: [
+          SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                  strokeWidth: 2, color: Colors.white)),
+          SizedBox(width: 12),
+          Text('Downloading…'),
+        ]),
+        duration: Duration(seconds: 60),
+      ));
+
+  showProgress();
+
+  try {
+    // ── Step 1: try direct fetch ─────────────────────────────────────────
+    DocCaptchaRequired? challenge;
+    String? filePath;
+    try {
+      filePath = await service.fetchDocument(url);
+    } on DocCaptchaRequired catch (e) {
+      challenge = e;
+    }
+
+    // ── Step 2: auto-solve captcha (up to 5 attempts) ────────────────────
+    if (filePath == null && challenge != null) {
+      var current = challenge;
+      for (int i = 0; i < 5 && filePath == null; i++) {
+        final captchaText = await CaptchaService.solve(current.captchaBytes);
+        if (captchaText.length != 6) continue;
+        try {
+          filePath =
+              await service.submitDocCaptcha(current.hiddenFields, captchaText, url);
+        } on DocCaptchaRequired catch (e) {
+          current = e; // new challenge — retry
+        }
+      }
+      challenge = current;
+    }
+
+    messenger.hideCurrentSnackBar();
+    if (!context.mounted) return;
+
+    // ── Step 3: open file if we got it ──────────────────────────────────
+    if (filePath != null) {
+      final result = await OpenFile.open(filePath);
+      if (result.type != ResultType.done && context.mounted) {
+        messenger.showSnackBar(
+            SnackBar(content: Text('Cannot open file: ${result.message}')));
+      }
+      return;
+    }
+
+    // ── Step 4: manual captcha fallback ─────────────────────────────────
+    if (challenge == null || !context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _DocCaptchaDialog(
+          challenge: challenge!, url: url, service: service),
+    );
+  } catch (e) {
+    messenger.hideCurrentSnackBar();
+    if (context.mounted) {
+      messenger.showSnackBar(SnackBar(content: Text('Download failed: $e')));
+    }
+  }
+}
+
+// ── Document captcha dialog ───────────────────────────────────────────────────
+
+class _DocCaptchaDialog extends StatefulWidget {
+  final DocCaptchaRequired challenge;
+  final String url;
+  final AdvancedSearchService service;
+
+  const _DocCaptchaDialog({
+    required this.challenge,
+    required this.url,
+    required this.service,
+  });
+
+  @override
+  State<_DocCaptchaDialog> createState() => _DocCaptchaDialogState();
+}
+
+class _DocCaptchaDialogState extends State<_DocCaptchaDialog> {
+  late DocCaptchaRequired _current;
+  final _ctrl = TextEditingController();
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _current = widget.challenge;
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final text = _ctrl.text.trim();
+    if (text.isEmpty) return;
+    setState(() => _loading = true);
+    try {
+      final path = await widget.service
+          .submitDocCaptcha(_current.hiddenFields, text, widget.url);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      final result = await OpenFile.open(path);
+      if (result.type != ResultType.done && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Cannot open file: ${result.message}')));
+      }
+    } on DocCaptchaRequired catch (e) {
+      setState(() {
+        _current = e;
+        _ctrl.clear();
+        _loading = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Wrong captcha — try again.')));
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _loading = false);
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Download failed: $e')));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Enter Document Captcha',
+          style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey.shade300),
+                borderRadius: BorderRadius.circular(6)),
+            padding: const EdgeInsets.all(8),
+            child: Image.memory(_current.captchaBytes,
+                scale: 0.5, filterQuality: FilterQuality.none),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _ctrl,
+            autofocus: true,
+            enabled: !_loading,
+            decoration: InputDecoration(
+              labelText: 'Captcha text',
+              border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8)),
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _loading ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _loading ? null : _submit,
+          style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.teal, foregroundColor: Colors.white),
+          child: _loading
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white))
+              : const Text('Submit'),
+        ),
+      ],
+    );
+  }
+}
+
 class _SummarySectionCard extends StatelessWidget {
   final SummarySection section;
-  const _SummarySectionCard({required this.section});
+  final AdvancedSearchService? service;
+  const _SummarySectionCard({required this.section, this.service});
 
   @override
   Widget build(BuildContext context) {
@@ -1613,7 +1809,7 @@ class _SummarySectionCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (section.title.isNotEmpty)
+          if (section.title.isNotEmpty && section.rows.isNotEmpty)
             Container(
               color: Colors.indigo,
               padding:
@@ -1626,11 +1822,15 @@ class _SummarySectionCard extends StatelessWidget {
             ),
           Padding(
             padding: const EdgeInsets.all(12),
-            child: section.isKeyValue
-                ? _buildKeyValue()
-                : section.isKeyValueLike
-                    ? _buildKeyValueLike()
-                    : _buildTable(),
+            child: section.rows.isEmpty
+                ? Text(section.title,
+                    style: const TextStyle(
+                        fontSize: 13, color: Colors.orange))
+                : section.isKeyValue
+                    ? _buildKeyValue()
+                    : section.isKeyValueLike
+                        ? _buildKeyValueLike()
+                        : _buildTable(context),
           ),
         ],
       ),
@@ -1699,11 +1899,15 @@ class _SummarySectionCard extends StatelessWidget {
     );
   }
 
-  Widget _cellWidget(String text, String? url) {
-    if (url != null && url.isNotEmpty) {
+  Widget _cellWidget(BuildContext context, String text, String? url,
+      {bool bundleOnly = false}) {
+    if (url != null &&
+        url.isNotEmpty &&
+        url.toLowerCase().contains('component=docdownoad')) {
       return GestureDetector(
-        onTap: () => launchUrl(Uri.parse(url),
-            mode: LaunchMode.externalApplication),
+        onTap: () => service != null
+            ? _downloadAndOpen(context, url, service!)
+            : launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
         child: Text(text,
             style: const TextStyle(
                 fontSize: 12,
@@ -1715,11 +1919,39 @@ class _SummarySectionCard extends StatelessWidget {
         style: const TextStyle(fontSize: 12, color: Colors.black87));
   }
 
-  Widget _buildTable() {
+  Widget _buildTable(BuildContext context) {
     final headers = section.headers;
     final dataRows = section.dataRows;
     final dataLinks = section.dataRowLinks;
     if (headers.isEmpty) return const SizedBox.shrink();
+
+    final showHeader = headers.any((h) => h.isNotEmpty);
+
+    // Single download link with no header → render as a styled button.
+    if (!showHeader && dataRows.length == 1 && dataRows.first.length == 1) {
+      final text = dataRows.first.first;
+      final url = dataLinks.isNotEmpty && dataLinks.first.isNotEmpty
+          ? dataLinks.first.first
+          : null;
+      if (url != null) {
+        return SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.archive_outlined, size: 16),
+            label: Text(text, style: const TextStyle(fontSize: 13)),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.teal,
+              side: const BorderSide(color: Colors.teal),
+              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+            ),
+            onPressed: () => service != null
+                ? _downloadAndOpen(context, url, service!)
+                : launchUrl(Uri.parse(url),
+                    mode: LaunchMode.externalApplication),
+          ),
+        );
+      }
+    }
 
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
@@ -1727,21 +1959,22 @@ class _SummarySectionCard extends StatelessWidget {
         defaultColumnWidth: const IntrinsicColumnWidth(),
         border: TableBorder.all(color: Colors.grey.shade200, width: 1),
         children: [
-          TableRow(
-            decoration: BoxDecoration(
-                color: Colors.indigo.withValues(alpha: 0.08)),
-            children: headers
-                .map((h) => Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 7),
-                      child: Text(h,
-                          style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.indigo)),
-                    ))
-                .toList(),
-          ),
+          if (showHeader)
+            TableRow(
+              decoration: BoxDecoration(
+                  color: Colors.indigo.withValues(alpha: 0.08)),
+              children: headers
+                  .map((h) => Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 7),
+                        child: Text(h,
+                            style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.indigo)),
+                      ))
+                  .toList(),
+            ),
           ...List.generate(dataRows.length, (ri) {
             final row = dataRows[ri];
             final links = ri < dataLinks.length ? dataLinks[ri] : <String?>[];
@@ -1756,7 +1989,7 @@ class _SummarySectionCard extends StatelessWidget {
                 (i) => Padding(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 10, vertical: 6),
-                  child: _cellWidget(padded[i], paddedLinks[i]),
+                  child: _cellWidget(context, padded[i], paddedLinks[i]),
                 ),
               ),
             );
@@ -1924,7 +2157,7 @@ class _LinkDetailScreenState extends State<_LinkDetailScreen> {
                           separatorBuilder: (_, __) =>
                               const SizedBox(height: 12),
                           itemBuilder: (_, i) =>
-                              _SummarySectionCard(section: _sections[i]),
+                              _SummarySectionCard(section: _sections[i], service: widget.service),
                         ),
         ),
       ),

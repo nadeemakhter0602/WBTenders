@@ -313,7 +313,7 @@ class _AdvancedSearchScreenState extends State<AdvancedSearchScreen> {
       final meta = await _service.beginSession();
       final captchaText = await CaptchaService.solve(meta.captchaBytes);
 
-      if (captchaText.length < 4 || captchaText.length > 9) {
+      if (captchaText.length != 6) {
         if (attempt + 1 < _maxAutoRetries) return _autoRetry(attempt + 1);
         return _showManualCaptcha();
       }

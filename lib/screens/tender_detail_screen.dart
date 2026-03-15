@@ -48,7 +48,7 @@ class _TenderDetailScreenState extends State<TenderDetailScreen> {
       final captchaBytes = await _service.beginSession();
       final captchaText = await CaptchaService.solve(captchaBytes);
 
-      if (captchaText.length < 4 || captchaText.length > 9) {
+      if (captchaText.length != 6) {
         if (attempt + 1 < _maxAutoRetries) return _autoRetry(attempt + 1);
         return _showManualCaptcha();
       }
